@@ -217,6 +217,21 @@ At start-up the interactive CLI mentions a newer release and notices from Tauric
 
 A saved report also includes `complete_report.html`, the report as one page with its sections listed beside the text, for reading in a browser, on a phone or in print. Answering the save question at the prompt also asks about the page and can open it in your browser; `--no-html` skips it, and so does `ta.save_reports(state, "NVDA", html=False)` from Python.
 
+### Web UI
+
+A local browser UI over the same engine, for one person on their own machine:
+
+```bash
+pip install -e ".[ui]"
+tradingagents-ui        # opens http://localhost:8501
+```
+
+- **New run** starts an analysis and shows each agent's progress and report as it lands.
+- **History** lists every saved run, from the UI or the CLI; open one by stage, or pick two or three to compare their decisions side by side.
+- **Settings** sets the default provider and models, checks Ollama, and shows which API keys are set (never their values).
+
+The UI starts in demo mode, which replays a saved run without calling a model, and defaults to Ollama with `qwen3:4b` (`ollama pull qwen3:4b`). Choosing OpenAI asks you to confirm before a paid run starts.
+
 ### Markets and tickers
 
 TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.
