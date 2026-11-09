@@ -3,7 +3,7 @@
 
 import streamlit as st
 
-from webui import history
+from webui import history, outcomes
 from webui.stages import STAGE_BY_KEY
 from webui.ui_common import rating_badge
 
@@ -23,8 +23,10 @@ start = span[0] if len(span) > 0 else None
 end = span[1] if len(span) > 1 else None
 shown = history.filter_runs(runs, tickers=tickers, start=start, end=end, ratings=ratings)
 
+result = outcomes.outcome_index()
 st.dataframe(
     [{"Ticker": r.ticker, "Analysis date": r.analysis_date, "Rating": r.rating,
+      "Outcome": result.get((r.ticker.upper(), r.analysis_date), "—"),
       "Models": r.models, "Generated": r.generated} for r in shown],
     hide_index=True,
 )
