@@ -9,7 +9,10 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from webui import prefs as prefs_mod  # noqa: E402
+from webui import (
+    portfolio_store,  # noqa: E402
+    prefs as prefs_mod,  # noqa: E402
+)
 from webui.events import set_active_run  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,9 @@ def page(name):
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(prefs_mod, "PREFS_PATH", tmp_path / "webui_prefs.json")
     monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "logs"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "memory_log_path", str(tmp_path / "memory" / "trading_memory.md"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "data_cache_dir", str(tmp_path / "cache"))
+    monkeypatch.setattr(portfolio_store, "PORTFOLIO_PATH", tmp_path / "webui_portfolio.json")
     yield
     set_active_run(None)
 
@@ -248,3 +254,79 @@ def test_skipped_caption():
 def test_history_empty():
     at = AppTest.from_file(page("history")).run()
     assert not at.exception and "No saved runs yet" in _text(at)
+
+
+# --- v2: portfolio and resume ---------------------------------------------
+
+
+@pytest.mark.unit
+def test_settings_saves_portfolio():
+    at = AppTest.from_file(page("settings")).run()
+    at.text_input(key="pf_currency").input("inr")
+    at.number_input(key="pf_cash").set_value(5000.0)
+    at.button(key="pf_save").click().run()
+    assert not at.exception
+    book = portfolio_store.load()
+    assert book is not None and book.currency == "INR" and book.cash == 5000.0
+
+
+@pytest.mark.unit
+def test_settings_saves_checkpoint_toggle():
+    at = AppTest.from_file(page("settings")).run()
+    at.toggle(key="checkpoint").set_value(False)
+    at.button(key="save").click().run()
+    assert prefs_mod.load_prefs().checkpoint is False
+
+
+@pytest.mark.unit
+def test_new_run_portfolio_toggle_only_when_saved():
+    at = AppTest.from_file(page("new_run")).run()
+    assert not [c for c in at.checkbox if c.key == "run_portfolio"]
+    assert "No portfolio saved" in _text(at)
+    portfolio_store.save(portfolio_store.from_rows([{"ticker": "AAPL", "quantity": 2}]))
+    at = AppTest.from_file(page("new_run")).run()
+    assert at.checkbox(key="run_portfolio").value is True
+
+
+@pytest.mark.unit
+def test_new_run_passes_portfolio_and_checkpoint(monkeypatch):
+    from webui import runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    portfolio_store.save(portfolio_store.from_rows([{"ticker": "AAPL", "quantity": 2}]))
+    seen = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(runner, "start_run", lambda req: seen.append(req))
+    at = AppTest.from_file(page("new_run")).run()
+    at.text_input(key="run_ticker").input("aapl").run()
+    at.button(key="run").click().run()
+    assert seen and seen[0].portfolio.positions[0].ticker == "AAPL" and seen[0].checkpoint is True
+    seen.clear()
+    at.checkbox(key="run_portfolio").uncheck().run()
+    at.button(key="run").click().run()
+    assert seen and seen[0].portfolio is None
+
+
+@pytest.mark.unit
+def test_failed_run_offers_resume(monkeypatch):
+    from webui import runner
+    from webui.events import RunEvent, RunHandle
+    req = runner.RunRequest("AAPL", "2026-11-06", ["market"], "ollama", "q", "q",
+                            "http://x/v1", 1, 1, checkpoint=True)
+    h = RunHandle("AAPL 2026-11-06", kind="analysis", request=req)
+    h.emit(RunEvent("error", content="The run stopped: boom"))
+    set_active_run(h)
+    restarted = []
+    monkeypatch.setattr(runner, "start_run", lambda r: restarted.append(r))
+    at = AppTest.from_file(page("new_run")).run()
+    assert at.button(key="resume").label == "Resume"
+    at.button(key="resume").click().run()
+    assert restarted == [req]
+
+
+@pytest.mark.unit
+def test_other_job_blocks_new_run():
+    from webui.events import RunHandle
+    set_active_run(RunHandle("Backtest · AAPL", kind="backtest"))
+    at = AppTest.from_file(page("new_run")).run()
+    assert not at.exception
+    assert any("Backtest in progress" in i.value for i in at.info)

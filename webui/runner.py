@@ -6,10 +6,12 @@ setup failures (Ollama down, model not pulled, no key) are caught by
 ``preflight`` before a thread starts, rather than minutes into a run.
 """
 
+import contextlib
 import os
 import threading
 import traceback
 from dataclasses import dataclass
+from typing import Any
 
 import requests
 
@@ -48,6 +50,9 @@ class RunRequest:
     ollama_url: str
     debate_rounds: int
     risk_rounds: int
+    # None is "no context", never a flat book (tradingagents.portfolio).
+    portfolio: Any = None           # PortfolioContext | None
+    checkpoint: bool = False        # save each step so a stopped run can resume
 
     def __post_init__(self):
         self.ticker = self.ticker.strip().upper()
@@ -63,7 +68,7 @@ def build_config(req: RunRequest) -> dict:
         max_debate_rounds=req.debate_rounds,
         max_risk_discuss_rounds=req.risk_rounds,
         output_language="English",
-        checkpoint_enabled=False,
+        checkpoint_enabled=req.checkpoint,
         # A per-tier override from .env would route that tier elsewhere,
         # possibly to a paid provider the user didn't pick here.
         quick_think_provider=None,
@@ -117,22 +122,35 @@ def state_to_events(state: dict, seen: dict[str, str]) -> list[RunEvent]:
     return events
 
 
+RESUMING = "Resuming from the last saved step."
+
+
 def start_run(req: RunRequest, graph_factory=None) -> RunHandle:
+    """Run ``req`` on a background thread. With ``req.checkpoint`` each step is
+    saved, so running the same request again after a failure resumes it."""
     if graph_factory is None:
         from tradingagents.graph.trading_graph import TradingAgentsGraph as graph_factory
-    handle = RunHandle(f"{req.ticker} {req.trade_date}")
+    handle = RunHandle(f"{req.ticker} {req.trade_date}", kind="analysis", request=req)
     set_active_run(handle)
 
     def run():
+        graph = None
         try:
             graph = graph_factory(selected_analysts=graph_analysts(req.analysts),
                                   config=build_config(req))
+            state = graph.create_run_state(req.ticker, req.trade_date, portfolio=req.portfolio)
+            args = graph.propagator.get_graph_args()
+            # As cli/run.py: a checkpointer when enabled, its thread id in the
+            # stream config, and None as input when a saved run resumes.
+            tid = graph.begin_checkpoint(req.ticker, req.trade_date, portfolio=req.portfolio)
+            if tid is not None:
+                args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+                if getattr(graph, "_resuming", False):
+                    handle.emit(RunEvent("stage", stage="resume", status="resuming", content=RESUMING))
             for name in req.analysts:
                 handle.emit(RunEvent("stage", stage=name, status="running"))
-            state = graph.create_run_state(req.ticker, req.trade_date)
-            args = graph.propagator.get_graph_args()
             final_state, seen = {}, {}
-            for _messages, chunk in graph.stream_run(state, **args):
+            for _messages, chunk in graph.stream_run(graph.checkpoint_input(state), **args):
                 if chunk is None:
                     continue
                 # Chunks are per-node deltas; merge as cli/run.py does.
@@ -140,12 +158,18 @@ def start_run(req: RunRequest, graph_factory=None) -> RunHandle:
                 for event in state_to_events(final_state, seen):
                     handle.emit(event)
             graph.record_decision(req.ticker, req.trade_date, final_state)
+            graph.clear_checkpoint_on_success(req.ticker, req.trade_date, portfolio=req.portfolio)
             path = graph.default_report_path(req.ticker)
             graph.save_reports(final_state, req.ticker, path, html=True)
             handle.emit(RunEvent("done", rating=run_rating(final_state), report_dir=str(path)))
         except Exception as exc:
             handle.emit(RunEvent("error", content=f"The run stopped: {exc}",
                                  detail=traceback.format_exc()))
+        finally:
+            if graph is not None and hasattr(graph, "end_checkpoint"):
+                # Tearing down must never mask the run's own outcome.
+                with contextlib.suppress(Exception):
+                    graph.end_checkpoint()
 
     threading.Thread(target=run, daemon=True).start()
     return handle

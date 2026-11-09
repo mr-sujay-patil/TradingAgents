@@ -48,10 +48,31 @@ class FakeGraph:
         self.selected, self.config = selected_analysts, config
         return self
 
-    def create_run_state(self, ticker, date):
-        return {}
+    resuming = False
+    calls: list
+
+    def create_run_state(self, ticker, date, asset_type="stock", portfolio=None):
+        self.portfolio = portfolio
+        return {"init": True}
+
+    def begin_checkpoint(self, ticker, date, asset_type="stock", portfolio=None):
+        self.calls = ["begin"]
+        if not self.config["checkpoint_enabled"]:
+            return None
+        self._resuming = self.resuming
+        return "tid-1"
+
+    def checkpoint_input(self, state):
+        return None if getattr(self, "_resuming", False) else state
+
+    def clear_checkpoint_on_success(self, *a, **k):
+        self.calls.append("clear")
+
+    def end_checkpoint(self):
+        self.calls.append("end")
 
     def stream_run(self, state, **args):
+        self.stream_input, self.stream_args = state, args
         yield from self.chunks
         if self.fail:
             raise RuntimeError("model fell over")
@@ -191,3 +212,54 @@ def test_saved_run_is_listed_in_history(tmp_path):
 def test_ollama_models_lists_ids():
     from webui.runner import ollama_models
     assert ollama_models("http://x/v1", get=_models("a", "b")) == ["a", "b"]
+
+
+@pytest.mark.unit
+def test_no_portfolio_reaches_graph_as_none(tmp_path):
+    fake = FakeGraph(tmp_path)
+    _drain(start_run(_req(), graph_factory=fake))
+    assert fake.portfolio is None
+
+
+@pytest.mark.unit
+def test_portfolio_reaches_graph(tmp_path):
+    from tradingagents.portfolio import PortfolioContext
+    book = PortfolioContext(cash=10, positions=[{"ticker": "AAPL", "quantity": 3}])
+    fake = FakeGraph(tmp_path)
+    h = start_run(_req(portfolio=book), graph_factory=fake)
+    _drain(h)
+    assert fake.portfolio is book and h.request.portfolio is book
+
+
+@pytest.mark.unit
+def test_checkpoint_flag_sets_config_and_thread(tmp_path):
+    fake = FakeGraph(tmp_path)
+    evs = _drain(start_run(_req(checkpoint=True), graph_factory=fake))
+    assert fake.config["checkpoint_enabled"] is True
+    assert fake.stream_args["config"]["configurable"]["thread_id"] == "tid-1"
+    assert fake.stream_input == {"init": True}
+    assert fake.calls == ["begin", "clear", "end"] and evs[-1].kind == "done"
+
+
+@pytest.mark.unit
+def test_checkpoint_off_by_default(tmp_path):
+    fake = FakeGraph(tmp_path)
+    _drain(start_run(_req(), graph_factory=fake))
+    assert fake.config["checkpoint_enabled"] is False and "config" not in fake.stream_args
+
+
+@pytest.mark.unit
+def test_failure_keeps_checkpoint_and_tears_down(tmp_path):
+    fake = FakeGraph(tmp_path, fail=True)
+    evs = _drain(start_run(_req(checkpoint=True), graph_factory=fake))
+    assert evs[-1].kind == "error" and fake.calls == ["begin", "end"]
+
+
+@pytest.mark.unit
+def test_resume_announced_and_streams_none(tmp_path):
+    from webui.runner import RESUMING
+    fake = FakeGraph(tmp_path)
+    fake.resuming = True
+    evs = _drain(start_run(_req(checkpoint=True), graph_factory=fake))
+    assert any(e.status == "resuming" and e.content == RESUMING for e in evs)
+    assert fake.stream_input is None

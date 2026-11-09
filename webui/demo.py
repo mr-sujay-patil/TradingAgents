@@ -29,7 +29,7 @@ def start_demo(report_dir: Path | None = None, delay: float = 1.0,
                reports_root: Path | None = None) -> RunHandle:
     path = _pick(report_dir, reports_root)
     detail = history.load_run(path)
-    handle = RunHandle(f"Demo · {detail.summary.ticker} {detail.summary.analysis_date}")
+    handle = RunHandle(f"Demo · {detail.summary.ticker} {detail.summary.analysis_date}", kind="demo")
     set_active_run(handle)
 
     def replay():
