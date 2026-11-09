@@ -10,6 +10,8 @@ nav = st.navigation([
     st.Page("pages/home.py", title="Home", default=True),
     st.Page("pages/new_run.py", title="New run"),
     st.Page("pages/history.py", title="History"),
+    st.Page("pages/outcomes.py", title="Outcomes"),
+    st.Page("pages/backtest.py", title="Backtest"),
     st.Page("pages/settings.py", title="Settings"),
 ])
 sidebar_status(get_prefs())

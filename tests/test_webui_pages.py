@@ -330,3 +330,108 @@ def test_other_job_blocks_new_run():
     at = AppTest.from_file(page("new_run")).run()
     assert not at.exception
     assert any("Backtest in progress" in i.value for i in at.info)
+
+
+# --- v2: outcomes and backtest ---------------------------------------------
+
+
+def _memory(tmp_path):
+    from tradingagents.memory import TradingMemoryLog
+    return TradingMemoryLog({"memory_log_path": DEFAULT_CONFIG["memory_log_path"]})
+
+
+@pytest.mark.unit
+def test_outcomes_empty_state(tmp_path):
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.exception and "No decisions recorded yet" in _text(at)
+
+
+@pytest.mark.unit
+def test_outcomes_lists_and_scores(tmp_path):
+    log = _memory(tmp_path)
+    log.store_decision("AAPL", "2026-10-01", "**Rating**: Buy\n\nup")
+    log.store_decision("NVDA", "2026-11-05", "**Rating**: Hold\n\nwait")
+    log.update_with_outcome("AAPL", "2026-10-01", 0.05, 0.02, 5, "Right call.", resolution_date="2026-10-08")
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.exception
+    assert [m.value for m in at.metric] == ["2", "1", "1"]
+    assert at.button(key="settle").disabled   # demo mode on by default
+    at.selectbox(key="o_pick").set_value(0).run()
+    assert "Right call." in _text(at)
+
+
+@pytest.mark.unit
+def test_outcomes_settle_starts_job(tmp_path, monkeypatch):
+    from webui import outcomes, runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    _memory(tmp_path).store_decision("AAPL", "2026-10-01", "**Rating**: Buy")
+    started = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(outcomes, "start_settle", lambda req: started.append(req))
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.button(key="settle").disabled
+    at.button(key="settle").click().run()
+    assert not at.exception and started and started[0].provider == "ollama"
+
+
+@pytest.mark.unit
+def test_history_shows_outcome_column(tmp_path):
+    from tests.webui_helpers import make_run
+    root = Path(DEFAULT_CONFIG["results_dir"]) / "reports"
+    make_run(root, "AAPL", "2026-10-01")
+    log = _memory(tmp_path)
+    log.store_decision("AAPL", "2026-10-01", "**Rating**: Hold")
+    log.update_with_outcome("AAPL", "2026-10-01", 0.05, 0.02, 5, "ok", resolution_date="2026-10-08")
+    at = AppTest.from_file(page("history")).run()
+    assert not at.exception
+    assert list(at.dataframe[0].value["Outcome"]) == ["α +2.0%"]
+
+
+@pytest.mark.unit
+def test_backtest_disabled_in_demo_mode():
+    at = AppTest.from_file(page("backtest")).run()
+    at.text_input(key="bt_tickers").input("AAPL").run()
+    assert not at.exception and at.button(key="bt_run").disabled
+    assert any("off in demo mode" in w.value for w in at.warning)
+
+
+@pytest.mark.unit
+def test_backtest_counts_and_caps():
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    at = AppTest.from_file(page("backtest")).run()
+    at.text_input(key="bt_tickers").input("aapl, msft").run()
+    assert "= **" in " ".join(i.value for i in at.info) and not at.button(key="bt_run").disabled
+    at.number_input(key="bt_every").set_value(1).run()
+    at.text_input(key="bt_tickers").input("A, B, C").run()
+    assert at.button(key="bt_run").disabled and any("limit of 60" in e.value for e in at.error)
+
+
+@pytest.mark.unit
+def test_backtest_starts_and_lists_past(tmp_path, monkeypatch):
+    from tradingagents.memory import TradingMemoryLog
+    from webui import backtest_runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    log = Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / "20261101_100000" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("NVDA", "2026-10-01", "**Rating**: Buy")
+    started = []
+    monkeypatch.setattr("webui.runner.preflight", lambda req: None)
+    monkeypatch.setattr(backtest_runner, "start_backtest", lambda req: started.append(req))
+    at = AppTest.from_file(page("backtest")).run()
+    assert any("20261101_100000" in e.label for e in at.expander)
+    at.text_input(key="bt_tickers").input("AAPL").run()
+    at.selectbox(key="bt_continue").set_value("20261101_100000").run()
+    at.button(key="bt_run").click().run()
+    assert not at.exception and started and started[0].run_id == "20261101_100000"
+
+
+@pytest.mark.unit
+def test_backtest_progress_view():
+    from webui.events import RunEvent, RunHandle
+    h = RunHandle("AAPL · 2026-01-05 → 2026-01-26", kind="backtest")
+    h.emit(RunEvent("progress", done=2, total=4, content="AAPL 2026-01-19"))
+    set_active_run(h)
+    at = AppTest.from_file(page("backtest")).run()
+    assert not at.exception and not [t for t in at.text_input if t.key == "bt_tickers"]
+    h.emit(RunEvent("done", title="20261109_1", content="Resolved cells: 0", report_dir="/x"))
+    at.run()
+    assert any("Sweep 20261109_1 finished" in s.value for s in at.success)
