@@ -41,15 +41,20 @@ dev = [
 bedrock = [
     "langchain-aws>=1.7.9",
 ]
+# Local web UI (tradingagents-ui). Optional so the core install needs no Streamlit.
+ui = [
+    "streamlit>=1.40",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-ui = "webui.launch:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "webui*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
