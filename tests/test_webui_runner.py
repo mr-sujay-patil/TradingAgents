@@ -185,3 +185,9 @@ def test_saved_run_is_listed_in_history(tmp_path):
     make_run(tmp_path, "AAPL", "2026-11-06")
     _drain(start_run(_req(), graph_factory=FakeGraph(tmp_path)))
     assert {r.ticker for r in list_runs(tmp_path)[0]} == {"AAPL"}
+
+
+@pytest.mark.unit
+def test_ollama_models_lists_ids():
+    from webui.runner import ollama_models
+    assert ollama_models("http://x/v1", get=_models("a", "b")) == ["a", "b"]

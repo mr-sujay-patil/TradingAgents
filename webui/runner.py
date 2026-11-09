@@ -78,15 +78,23 @@ def graph_analysts(names: list[str]) -> list[str]:
     return ["social" if n == "sentiment" else n for n in names]
 
 
+OLLAMA_DOWN = "Ollama isn't running. Start it with `ollama serve`."
+
+
+def ollama_models(url: str, get=requests.get) -> list[str]:
+    """The models pulled into the Ollama at ``url``; raises requests errors if it is down."""
+    resp = get(f"{url.rstrip('/')}/models", timeout=3)
+    resp.raise_for_status()
+    return [m.get("id") for m in resp.json().get("data", [])]
+
+
 def preflight(req: RunRequest, get=requests.get) -> str | None:
     """A plain-language reason the run can't start, or None."""
     if req.provider == "ollama":
         try:
-            resp = get(f"{req.ollama_url.rstrip('/')}/models", timeout=3)
-            resp.raise_for_status()
-            installed = {m.get("id") for m in resp.json().get("data", [])}
+            installed = set(ollama_models(req.ollama_url, get=get))
         except (requests.ConnectionError, requests.Timeout):
-            return "Ollama isn't running. Start it with `ollama serve`."
+            return OLLAMA_DOWN
         for model in (req.quick_model, req.deep_model):
             if model not in installed:
                 return f"Model `{model}` isn't installed. Run `ollama pull {model}`."

@@ -43,7 +43,7 @@ bedrock = [
 ]
 # Local web UI (tradingagents-ui). Optional so the core install needs no Streamlit.
 ui = [
-    "streamlit>=1.40",
+    "streamlit>=1.45",
 ]
 
 [project.scripts]
