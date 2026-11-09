@@ -12,6 +12,9 @@ from webui import history
 from webui.events import RunEvent, RunHandle, set_active_run
 from webui.stages import STAGE_BY_KEY, STAGES
 
+# Seconds between replayed stages; tests set it to 0.
+DEMO_DELAY = 1.0
+
 SAMPLE_REPORT = Path(__file__).with_name("sample_report") / "DEMO_20261106_000000"
 
 
