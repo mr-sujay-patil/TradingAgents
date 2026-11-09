@@ -9,7 +9,10 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
-from webui import prefs as prefs_mod  # noqa: E402
+from webui import (
+    portfolio_store,  # noqa: E402
+    prefs as prefs_mod,  # noqa: E402
+)
 from webui.events import set_active_run  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,9 @@ def page(name):
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(prefs_mod, "PREFS_PATH", tmp_path / "webui_prefs.json")
     monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path / "logs"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "memory_log_path", str(tmp_path / "memory" / "trading_memory.md"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "data_cache_dir", str(tmp_path / "cache"))
+    monkeypatch.setattr(portfolio_store, "PORTFOLIO_PATH", tmp_path / "webui_portfolio.json")
     yield
     set_active_run(None)
 
@@ -248,3 +254,184 @@ def test_skipped_caption():
 def test_history_empty():
     at = AppTest.from_file(page("history")).run()
     assert not at.exception and "No saved runs yet" in _text(at)
+
+
+# --- v2: portfolio and resume ---------------------------------------------
+
+
+@pytest.mark.unit
+def test_settings_saves_portfolio():
+    at = AppTest.from_file(page("settings")).run()
+    at.text_input(key="pf_currency").input("inr")
+    at.number_input(key="pf_cash").set_value(5000.0)
+    at.button(key="pf_save").click().run()
+    assert not at.exception
+    book = portfolio_store.load()
+    assert book is not None and book.currency == "INR" and book.cash == 5000.0
+
+
+@pytest.mark.unit
+def test_settings_saves_checkpoint_toggle():
+    at = AppTest.from_file(page("settings")).run()
+    at.toggle(key="checkpoint").set_value(False)
+    at.button(key="save").click().run()
+    assert prefs_mod.load_prefs().checkpoint is False
+
+
+@pytest.mark.unit
+def test_new_run_portfolio_toggle_only_when_saved():
+    at = AppTest.from_file(page("new_run")).run()
+    assert not [c for c in at.checkbox if c.key == "run_portfolio"]
+    assert "No portfolio saved" in _text(at)
+    portfolio_store.save(portfolio_store.from_rows([{"ticker": "AAPL", "quantity": 2}]))
+    at = AppTest.from_file(page("new_run")).run()
+    assert at.checkbox(key="run_portfolio").value is True
+
+
+@pytest.mark.unit
+def test_new_run_passes_portfolio_and_checkpoint(monkeypatch):
+    from webui import runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    portfolio_store.save(portfolio_store.from_rows([{"ticker": "AAPL", "quantity": 2}]))
+    seen = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(runner, "start_run", lambda req: seen.append(req))
+    at = AppTest.from_file(page("new_run")).run()
+    at.text_input(key="run_ticker").input("aapl").run()
+    at.button(key="run").click().run()
+    assert seen and seen[0].portfolio.positions[0].ticker == "AAPL" and seen[0].checkpoint is True
+    seen.clear()
+    at.checkbox(key="run_portfolio").uncheck().run()
+    at.button(key="run").click().run()
+    assert seen and seen[0].portfolio is None
+
+
+@pytest.mark.unit
+def test_failed_run_offers_resume(monkeypatch):
+    from webui import runner
+    from webui.events import RunEvent, RunHandle
+    req = runner.RunRequest("AAPL", "2026-11-06", ["market"], "ollama", "q", "q",
+                            "http://x/v1", 1, 1, checkpoint=True)
+    h = RunHandle("AAPL 2026-11-06", kind="analysis", request=req)
+    h.emit(RunEvent("error", content="The run stopped: boom"))
+    set_active_run(h)
+    restarted = []
+    monkeypatch.setattr(runner, "start_run", lambda r: restarted.append(r))
+    at = AppTest.from_file(page("new_run")).run()
+    assert at.button(key="resume").label == "Resume"
+    at.button(key="resume").click().run()
+    assert restarted == [req]
+
+
+@pytest.mark.unit
+def test_other_job_blocks_new_run():
+    from webui.events import RunHandle
+    set_active_run(RunHandle("Backtest · AAPL", kind="backtest"))
+    at = AppTest.from_file(page("new_run")).run()
+    assert not at.exception
+    assert any("Backtest in progress" in i.value for i in at.info)
+
+
+# --- v2: outcomes and backtest ---------------------------------------------
+
+
+def _memory(tmp_path):
+    from tradingagents.memory import TradingMemoryLog
+    return TradingMemoryLog({"memory_log_path": DEFAULT_CONFIG["memory_log_path"]})
+
+
+@pytest.mark.unit
+def test_outcomes_empty_state(tmp_path):
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.exception and "No decisions recorded yet" in _text(at)
+
+
+@pytest.mark.unit
+def test_outcomes_lists_and_scores(tmp_path):
+    log = _memory(tmp_path)
+    log.store_decision("AAPL", "2026-10-01", "**Rating**: Buy\n\nup")
+    log.store_decision("NVDA", "2026-11-05", "**Rating**: Hold\n\nwait")
+    log.update_with_outcome("AAPL", "2026-10-01", 0.05, 0.02, 5, "Right call.", resolution_date="2026-10-08")
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.exception
+    assert [m.value for m in at.metric] == ["2", "1", "1"]
+    assert at.button(key="settle").disabled   # demo mode on by default
+    at.selectbox(key="o_pick").set_value(0).run()
+    assert "Right call." in _text(at)
+
+
+@pytest.mark.unit
+def test_outcomes_settle_starts_job(tmp_path, monkeypatch):
+    from webui import outcomes, runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    _memory(tmp_path).store_decision("AAPL", "2026-10-01", "**Rating**: Buy")
+    started = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(outcomes, "start_settle", lambda req: started.append(req))
+    at = AppTest.from_file(page("outcomes")).run()
+    assert not at.button(key="settle").disabled
+    at.button(key="settle").click().run()
+    assert not at.exception and started and started[0].provider == "ollama"
+
+
+@pytest.mark.unit
+def test_history_shows_outcome_column(tmp_path):
+    from tests.webui_helpers import make_run
+    root = Path(DEFAULT_CONFIG["results_dir"]) / "reports"
+    make_run(root, "AAPL", "2026-10-01")
+    log = _memory(tmp_path)
+    log.store_decision("AAPL", "2026-10-01", "**Rating**: Hold")
+    log.update_with_outcome("AAPL", "2026-10-01", 0.05, 0.02, 5, "ok", resolution_date="2026-10-08")
+    at = AppTest.from_file(page("history")).run()
+    assert not at.exception
+    assert list(at.dataframe[0].value["Outcome"]) == ["α +2.0%"]
+
+
+@pytest.mark.unit
+def test_backtest_disabled_in_demo_mode():
+    at = AppTest.from_file(page("backtest")).run()
+    at.text_input(key="bt_tickers").input("AAPL").run()
+    assert not at.exception and at.button(key="bt_run").disabled
+    assert any("off in demo mode" in w.value for w in at.warning)
+
+
+@pytest.mark.unit
+def test_backtest_counts_and_caps():
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    at = AppTest.from_file(page("backtest")).run()
+    at.text_input(key="bt_tickers").input("aapl, msft").run()
+    assert "= **" in " ".join(i.value for i in at.info) and not at.button(key="bt_run").disabled
+    at.number_input(key="bt_every").set_value(1).run()
+    at.text_input(key="bt_tickers").input("A, B, C").run()
+    assert at.button(key="bt_run").disabled and any("limit of 60" in e.value for e in at.error)
+
+
+@pytest.mark.unit
+def test_backtest_starts_and_lists_past(tmp_path, monkeypatch):
+    from tradingagents.memory import TradingMemoryLog
+    from webui import backtest_runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    log = Path(DEFAULT_CONFIG["results_dir"]) / "backtest" / "20261101_100000" / "trading_memory.md"
+    TradingMemoryLog({"memory_log_path": str(log)}).store_decision("NVDA", "2026-10-01", "**Rating**: Buy")
+    started = []
+    monkeypatch.setattr("webui.runner.preflight", lambda req: None)
+    monkeypatch.setattr(backtest_runner, "start_backtest", lambda req: started.append(req))
+    at = AppTest.from_file(page("backtest")).run()
+    assert any("20261101_100000" in e.label for e in at.expander)
+    at.text_input(key="bt_tickers").input("AAPL").run()
+    at.selectbox(key="bt_continue").set_value("20261101_100000").run()
+    at.button(key="bt_run").click().run()
+    assert not at.exception and started and started[0].run_id == "20261101_100000"
+
+
+@pytest.mark.unit
+def test_backtest_progress_view():
+    from webui.events import RunEvent, RunHandle
+    h = RunHandle("AAPL · 2026-01-05 → 2026-01-26", kind="backtest")
+    h.emit(RunEvent("progress", done=2, total=4, content="AAPL 2026-01-19"))
+    set_active_run(h)
+    at = AppTest.from_file(page("backtest")).run()
+    assert not at.exception and not [t for t in at.text_input if t.key == "bt_tickers"]
+    h.emit(RunEvent("done", title="20261109_1", content="Resolved cells: 0", report_dir="/x"))
+    at.run()
+    assert any("Sweep 20261109_1 finished" in s.value for s in at.success)

@@ -27,7 +27,37 @@ def sidebar_status(prefs: UIPrefs) -> None:
         st.markdown(f"LLM: {provider_label(prefs)}")
         run = active_run()
         if run is not None and not run.finished:
-            st.markdown(f"⏳ Run in progress: {run.label}")
+            st.markdown(f"⏳ {_KIND_NAMES.get(run.kind, 'Run')} in progress: {run.label}")
+
+
+_KIND_NAMES = {"analysis": "Run", "demo": "Demo run", "settle": "Settling", "backtest": "Backtest"}
+# The page that shows each kind of job's progress.
+JOB_PAGES = {"analysis": "pages/new_run.py", "demo": "pages/new_run.py",
+             "settle": "pages/outcomes.py", "backtest": "pages/backtest.py"}
+
+
+def other_job_notice(kinds: tuple[str, ...]) -> bool:
+    """When a job this page doesn't own is running, say so and link to it. True if one is."""
+    run = active_run()
+    if run is None or run.finished or run.kind in kinds:
+        return False
+    st.info(f"{_KIND_NAMES.get(run.kind, 'A job')} in progress ({run.label}). "
+            "One job runs at a time; this page is available when it finishes.")
+    if st.button("Go to it", key="goto_job"):
+        st.switch_page(JOB_PAGES.get(run.kind, "pages/home.py"))
+    return True
+
+
+def portfolio_choice(key: str):
+    """'Use my portfolio' when one is saved: the book, or None (no context at all)."""
+    from webui import portfolio_store
+
+    book = portfolio_store.load()
+    if book is None:
+        st.caption("No portfolio saved — runs see no holdings. Add one in Settings.")
+        return None
+    use = st.checkbox(f"Use my portfolio ({portfolio_store.describe(book)})", value=True, key=key)
+    return book if use else None
 
 
 def rating_badge(rating: str) -> str:
@@ -68,7 +98,7 @@ def _pipeline(events) -> str:
 
     finished = any(e.kind == "done" for e in events)
     reported = {e.stage for e in events if e.kind == "report"}
-    analysts = [e.stage for e in events if e.kind == "stage"]
+    analysts = [e.stage for e in events if e.kind == "stage" and e.status != "resuming"]
     reached = [GROUPS.index(STAGE_BY_KEY[k].group) for k in reported]
     furthest = max(reached, default=-1)
 
@@ -102,6 +132,9 @@ def _render(handle) -> None:
     if not handle.finished:
         st.caption(f"Elapsed: {int(time.monotonic() - handle.started_at)} s")
     for e in events:
+        if e.kind == "stage" and e.status == "resuming":
+            st.info(e.content)
+    for e in events:
         if e.kind == "report":
             with st.expander(e.title or e.stage, expanded=e.stage == "portfolio"):
                 st.markdown(e.content or "")
@@ -120,6 +153,16 @@ def _render(handle) -> None:
         if last.detail:
             with st.expander("Details"):
                 st.code(last.detail)
+        req = getattr(handle, "request", None)
+        if handle.kind == "analysis" and req is not None:
+            label = "Resume" if req.checkpoint else "Run again"
+            help_ = ("Continues from the last saved step. Same settings only: a changed "
+                     "model, analyst, round count or portfolio starts fresh."
+                     if req.checkpoint else "Checkpoints are off in Settings, so this starts over.")
+            if st.button(label, key="resume", type="primary", help=help_):
+                from webui import runner
+                runner.start_run(req)
+                st.rerun()
         if st.button("Back to form", key="back"):
             from webui.events import set_active_run
             set_active_run(None)

@@ -228,9 +228,13 @@ tradingagents-ui        # opens http://localhost:8501
 
 - **New run** starts an analysis and shows each agent's progress and report as it lands.
 - **History** lists every saved run, from the UI or the CLI; open one by stage, or pick two or three to compare their decisions side by side.
-- **Settings** sets the default provider and models, checks Ollama, and shows which API keys are set (never their values).
+- **Outcomes** shows how past decisions did against their benchmark, scored by rating, and settles the ones now due.
+- **Backtest** runs a grid of tickers and past dates with live progress, and lists past sweeps with their scores.
+- **Settings** sets the default provider and models, checks Ollama, keeps your portfolio (holdings and cash the agents see), toggles checkpoints, and shows which API keys are set (never their values).
 
-The UI starts in demo mode, which replays a saved run without calling a model, and defaults to Ollama with `qwen3:4b` (`ollama pull qwen3:4b`). Choosing OpenAI asks you to confirm before a paid run starts.
+A live run that stops part-way can be resumed from its last finished step (checkpoints are on by default).
+
+The UI starts in demo mode, which replays a saved run without calling a model, and defaults to Ollama with `qwen3:4b` (`ollama pull qwen3:4b`). Choosing OpenAI asks you to confirm before a paid run starts. Backtests and settling are off in demo mode.
 
 ### Markets and tickers
 

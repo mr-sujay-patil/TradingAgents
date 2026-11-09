@@ -7,13 +7,22 @@ import streamlit as st
 from webui.events import active_run
 from webui.runner import RunRequest
 from webui.stages import ANALYSTS, STAGE_BY_KEY
-from webui.ui_common import get_prefs, render_progress, run_blocked, start
+from webui.ui_common import (
+    get_prefs,
+    other_job_notice,
+    portfolio_choice,
+    render_progress,
+    run_blocked,
+    start,
+)
 
 st.title("New run")
 prefs = get_prefs()
 handle = active_run()
 
-if handle is not None:
+if other_job_notice(("analysis", "demo")):
+    st.stop()
+if handle is not None and handle.kind in ("analysis", "demo"):
     render_progress(handle)
     st.stop()
 
@@ -38,6 +47,8 @@ c3, c4 = st.columns(2)
 debate = c3.number_input("Debate rounds", 1, 5, prefs.debate_rounds, key="run_debate")
 risk = c4.number_input("Risk rounds", 1, 5, prefs.risk_rounds, key="run_risk")
 
+book = portfolio_choice("run_portfolio")
+
 paid = provider == "openai" and not prefs.demo_mode
 if prefs.demo_mode:
     st.info("Demo mode — replays a saved run. Free; no model is called. Turn it off in Settings.")
@@ -51,7 +62,8 @@ disabled = not ticker.strip() or not analysts or not paid_ok or run_blocked()
 if st.button("Run", key="run", type="primary", disabled=disabled):
     req = RunRequest(ticker=ticker, trade_date=day.isoformat(), analysts=analysts,
                      provider=provider, quick_model=quick.strip(), deep_model=deep.strip(),
-                     ollama_url=prefs.ollama_url, debate_rounds=int(debate), risk_rounds=int(risk))
+                     ollama_url=prefs.ollama_url, debate_rounds=int(debate), risk_rounds=int(risk),
+                     portfolio=book, checkpoint=prefs.checkpoint)
     problem = start(req, prefs.demo_mode)
     if problem:
         st.error(problem)

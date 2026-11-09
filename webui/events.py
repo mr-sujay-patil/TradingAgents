@@ -14,7 +14,7 @@ from typing import Literal
 
 @dataclass
 class RunEvent:
-    kind: Literal["stage", "report", "done", "error"]
+    kind: Literal["stage", "report", "progress", "done", "error"]
     stage: str | None = None
     status: str | None = None
     title: str | None = None
@@ -22,11 +22,19 @@ class RunEvent:
     report_dir: str | None = None
     rating: str | None = None
     detail: str | None = None   # an error's traceback
+    done: int | None = None     # progress: cells finished so far
+    total: int | None = None    # progress: cells in the job
 
 
 class RunHandle:
-    def __init__(self, label: str):
+    """One job's event stream. ``kind`` says which page owns it (analysis, demo,
+    settle, backtest); ``request`` is what started it, kept so a stopped run can
+    be resumed after a refresh."""
+
+    def __init__(self, label: str, kind: str = "analysis", request=None):
         self.label = label
+        self.kind = kind
+        self.request = request
         self.started_at = time.monotonic()
         self._events: list[RunEvent] = []
         self._lock = threading.Lock()

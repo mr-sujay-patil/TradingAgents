@@ -11,6 +11,10 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 ### Added
 
 - A local web UI: `pip install -e ".[ui]"`, then `tradingagents-ui`. It starts runs and shows each agent's progress live, lists every saved run (from the UI or the CLI) with filters, opens a report by stage, and compares two or three runs side by side. Demo mode replays a saved run without calling a model, and new runs default to Ollama, so trying it costs nothing. A paid provider asks for confirmation before a run starts.
+- Web UI: a **Backtest** page runs a ticker × date grid with live progress, continues an earlier sweep by its id, and lists past sweeps with per-rating scores (capped at 60 runs per sweep from the UI).
+- Web UI: an **Outcomes** page shows how past decisions did (return, alpha against the benchmark, reflection), scores them by rating, and settles due decisions on demand; History gains an Outcome column.
+- Web UI: a standing **portfolio** (holdings, cash, currency) kept in Settings, in the same format as `--portfolio`, used by New run, Home and Backtest when ticked.
+- Web UI: live runs save **checkpoints** by default, and a run that stops part-way offers Resume from its last finished step.
 
 ## [0.7.1] — 2026-10-27
 

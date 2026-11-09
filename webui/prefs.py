@@ -24,6 +24,7 @@ class UIPrefs:
     debate_rounds: int = 1
     risk_rounds: int = 1
     demo_mode: bool = True
+    checkpoint: bool = True     # save each step so a stopped live run can resume
 
 
 def load_prefs(path: Path | None = None) -> UIPrefs:
