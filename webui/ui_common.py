@@ -1,5 +1,7 @@
 """Pieces every page shares: the prefs in this session, the sidebar status, rating badges."""
 
+from dataclasses import dataclass
+
 import streamlit as st
 
 from webui.events import active_run
@@ -16,9 +18,182 @@ def get_prefs() -> UIPrefs:
 
 
 def provider_label(prefs: UIPrefs) -> str:
-    if prefs.provider == "openai":
-        return f"OpenAI · {prefs.quick_model} / {prefs.deep_model} (paid)"
-    return f"Ollama · {prefs.quick_model} / {prefs.deep_model} (free)"
+    from webui import providers
+
+    cost = "paid" if providers.run_paid(prefs.provider, prefs.deep_provider) else "free"
+    if prefs.deep_provider and prefs.deep_provider != prefs.provider:
+        return (f"{providers.label(prefs.provider)} · {prefs.quick_model} / "
+                f"{providers.label(prefs.deep_provider)} · {prefs.deep_model} ({cost})")
+    return f"{providers.label(prefs.provider)} · {prefs.quick_model} / {prefs.deep_model} ({cost})"
+
+
+CUSTOM_MODEL = "Other model ID…"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _installed_ollama(url: str) -> list[str]:
+    import requests
+
+    from webui.runner import ollama_models
+
+    try:
+        return [m for m in ollama_models(url) if m]
+    except (requests.RequestException, OSError, ValueError):
+        return []
+
+
+def _model_input(col, title: str, provider: str, tier: str, current: str, key: str, url: str) -> str:
+    """A pick from the provider's models (installed ones, for Ollama), or any model ID."""
+    from webui import providers
+
+    choices = _installed_ollama(url) if provider == "ollama" and url else []
+    choices = choices or providers.model_choices(provider, tier)
+    if not choices:
+        return col.text_input(title, current, key=key, placeholder="model ID").strip()
+    options = ([current] if current and current not in choices else []) + choices + [CUSTOM_MODEL]
+    pick = col.selectbox(title, options, index=options.index(current) if current in options else 0,
+                         key=key)
+    if pick == CUSTOM_MODEL:
+        return col.text_input(f"{title} ID", key=f"{key}_custom", placeholder="model ID").strip()
+    return pick
+
+
+def _provider_input(title: str, current: str, key: str, exclude: str = "") -> str:
+    from webui import providers
+
+    keys = [k for k in providers.KEYS if k != exclude]
+    return st.selectbox(title, keys, format_func=providers.label, key=key,
+                        index=keys.index(current) if current in keys else 0)
+
+
+def _url_input(provider: str, current_ollama: str, current_server: str, key: str) -> str:
+    """The endpoint a local provider needs; "" for a hosted one (its client knows its own)."""
+    if provider == "ollama":
+        return st.text_input("Ollama URL", current_ollama, key=f"{key}ollama_url").strip()
+    if provider == "openai_compatible":
+        return st.text_input("Server URL", current_server, key=f"{key}backend_url",
+                             placeholder="e.g. http://localhost:8000/v1 for vLLM").strip()
+    return ""
+
+
+@dataclass
+class LLMChoice:
+    provider: str
+    quick: str
+    deep: str
+    url: str                # the main provider's endpoint, when it takes one
+    deep_provider: str = ""  # "" when the deep tier shares the main provider
+    deep_url: str = ""
+
+    @property
+    def tiers(self) -> list[tuple[str, str]]:
+        """(provider, endpoint) for each provider the run uses."""
+        return [(self.provider, self.url)] + ([(self.deep_provider, self.deep_url)] if self.deep_provider else [])
+
+    def request_fields(self, ollama_url: str) -> dict:
+        """The RunRequest fields this choice sets; ``ollama_url`` is kept when Ollama isn't picked."""
+        return {"provider": self.provider, "quick_model": self.quick, "deep_model": self.deep,
+                "ollama_url": self.url if self.provider == "ollama" else ollama_url,
+                "backend_url": self.url if self.provider == "openai_compatible" else "",
+                "deep_provider": self.deep_provider, "deep_backend_url": self.deep_url}
+
+
+def llm_inputs(prefs: UIPrefs, prefix: str) -> LLMChoice:
+    """Provider, models and endpoints; optionally the deep tier on a provider of its own."""
+    provider = _provider_input("Provider", prefs.provider, f"{prefix}provider")
+    url = _url_input(provider, prefs.ollama_url, prefs.backend_url, prefix)
+    split_saved = bool(prefs.deep_provider) and prefs.deep_provider != prefs.provider
+    split = st.checkbox("Run the deep-thinking tier (Research and Portfolio Managers) on another "
+                        "provider", value=split_saved, key=f"{prefix}split")
+    # The saved models belong to the saved providers; another one starts at its own defaults.
+    c1, c2 = st.columns(2)
+    # Keyed by provider, so each keeps its own pick while the user switches around.
+    quick = _model_input(c1, "Quick-thinking model", provider, "quick",
+                         prefs.quick_model if provider == prefs.provider else "",
+                         f"{prefix}quick_{provider}", url)
+    if not split:
+        deep = _model_input(c2, "Deep-thinking model", provider, "deep",
+                            prefs.deep_model if provider == prefs.provider and not split_saved else "",
+                            f"{prefix}deep_{provider}", url)
+        return LLMChoice(provider, quick, deep, url)
+    with c2:
+        deep_provider = _provider_input("Deep-thinking provider", prefs.deep_provider,
+                                        f"{prefix}deep_provider", exclude=provider)
+        deep_url = _url_input(deep_provider, prefs.deep_backend_url or prefs.ollama_url,
+                              prefs.deep_backend_url, f"{prefix}deep_")
+    deep = _model_input(c2, "Deep-thinking model", deep_provider, "deep",
+                        prefs.deep_model if deep_provider == prefs.deep_provider else "",
+                        f"{prefix}deep_{deep_provider}_split", deep_url)
+    return LLMChoice(provider, quick, deep, url, deep_provider, deep_url)
+
+
+def cost_notice(choice: LLMChoice, demo_mode: bool) -> bool:
+    """Say what the run costs and what it still needs; True when it bills an account."""
+    from webui import providers
+
+    if demo_mode:
+        st.info("Demo mode — replays a saved run. Free; no model is called. Turn it off in Settings.")
+        return False
+    paid = providers.run_paid(choice.provider, choice.deep_provider)
+    names = " + ".join(providers.label(p) for p, _ in choice.tiers)
+    if paid:
+        st.warning(f"{names} — paid.")
+    else:
+        st.info(f"{names} — free; runs on your own server.")
+    for provider, url in choice.tiers:
+        if provider != "ollama" and (setup := providers.missing_setup(provider, url)):
+            st.caption(f"Before this can run: {setup}")
+    return paid
+
+
+LANGUAGES = ["English", "Chinese", "Japanese", "Korean", "Hindi", "Spanish", "Portuguese",
+             "French", "German", "Arabic", "Russian"]
+OTHER_LANGUAGE = "Other language…"
+# config key -> (label, the providers that read it, [(value, label)]); "" is the provider's default.
+EFFORTS = {
+    "openai_reasoning_effort": ("OpenAI reasoning effort", ("openai",),
+                                [("", "Provider default"), ("low", "Low (faster)"), ("medium", "Medium"),
+                                 ("high", "High (more thorough)")]),
+    "anthropic_effort": ("Anthropic effort", ("anthropic",),
+                         [("", "Provider default"), ("low", "Low (faster, cheaper)"),
+                          ("medium", "Medium"), ("high", "High")]),
+    "google_thinking_level": ("Gemini thinking", ("google",),
+                              [("", "Provider default"), ("high", "On"), ("minimal", "Minimal")]),
+}
+
+
+def advanced_inputs(prefs: UIPrefs, prefix: str, choice: LLMChoice) -> dict:
+    """Language, reasoning effort and temperature: RunRequest fields, prefilled from ``prefs``.
+
+    An effort knob shows only when a provider the run uses reads it; the others keep
+    their saved value, so switching providers doesn't lose them.
+    """
+    used = {p for p, _ in choice.tiers}
+    with st.expander("Advanced"):
+        options = LANGUAGES + [OTHER_LANGUAGE]
+        saved = prefs.output_language or "English"
+        pick = st.selectbox("Report language", options, key=f"{prefix}language",
+                            index=options.index(saved) if saved in options else len(LANGUAGES),
+                            help="The agents debate in English; the reports are written in this language.")
+        language = (st.text_input("Language", "" if saved in LANGUAGES else saved, key=f"{prefix}language_other",
+                                  placeholder="e.g. Turkish, Vietnamese").strip() or "English"
+                    if pick == OTHER_LANGUAGE else pick)
+        fields = {"output_language": language}
+        for name, (title, readers, levels) in EFFORTS.items():
+            current = getattr(prefs, name) or ""
+            if not used & set(readers):
+                fields[name] = current
+                continue
+            values = [v for v, _ in levels]
+            fields[name] = st.selectbox(title, values, format_func=dict(levels).get, key=f"{prefix}{name}",
+                                        index=values.index(current) if current in values else 0)
+        set_temp = st.checkbox("Set the sampling temperature", value=prefs.temperature is not None,
+                               key=f"{prefix}set_temp",
+                               help="Off leaves each provider at its own default. Reasoning models largely "
+                                    "ignore it, and no setting makes runs identical.")
+        fields["temperature"] = (st.slider("Temperature", 0.0, 2.0, float(prefs.temperature or 0.7), 0.05,
+                                           key=f"{prefix}temp") if set_temp else None)
+    return fields
 
 
 def sidebar_status(prefs: UIPrefs) -> None:

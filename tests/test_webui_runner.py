@@ -13,6 +13,7 @@ from tradingagents.reporting import write_report_tree
 from webui.events import set_active_run
 from webui.runner import (
     RunRequest,
+    asset_type,
     build_config,
     graph_analysts,
     preflight,
@@ -52,11 +53,12 @@ class FakeGraph:
     calls: list
 
     def create_run_state(self, ticker, date, asset_type="stock", portfolio=None):
-        self.portfolio = portfolio
+        self.portfolio, self.asset_type = portfolio, asset_type
         return {"init": True}
 
     def begin_checkpoint(self, ticker, date, asset_type="stock", portfolio=None):
         self.calls = ["begin"]
+        self.checkpoint_asset_type = asset_type
         if not self.config["checkpoint_enabled"]:
             return None
         self._resuming = self.resuming
@@ -194,7 +196,7 @@ def test_preflight_ok():
 @pytest.mark.unit
 def test_preflight_openai_no_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "")
-    assert preflight(_req(provider="openai")) == "No OpenAI key in `.env`."
+    assert preflight(_req(provider="openai")) == "No OpenAI key in `.env` (`OPENAI_API_KEY`)."
     monkeypatch.setenv("OPENAI_API_KEY", "placeholder")
     assert preflight(_req(provider="openai")) is None
 
@@ -263,3 +265,117 @@ def test_resume_announced_and_streams_none(tmp_path):
     evs = _drain(start_run(_req(checkpoint=True), graph_factory=fake))
     assert any(e.status == "resuming" and e.content == RESUMING for e in evs)
     assert fake.stream_input is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ticker", ["BTC-USD", "eth-usdt", "BTCUSD", "AAPL", "0700.HK", "SPY", "XAUUSD"])
+def test_asset_type_matches_cli(ticker):
+    """The UI classifies a ticker exactly as the CLI does."""
+    from cli.prompts import detect_asset_type
+    assert asset_type(ticker) == detect_asset_type(ticker).value
+
+
+@pytest.mark.unit
+def test_crypto_ticker_is_canonical_and_drops_fundamentals():
+    req = _req(ticker="btcusd", analysts=["market", "news", "fundamentals"])
+    assert req.ticker == "BTC-USD" and req.asset_type == "crypto"
+    assert req.analysts == ["market", "news"]
+    stock = _req(ticker="aapl", analysts=["market", "fundamentals"])
+    assert stock.asset_type == "stock" and stock.analysts == ["market", "fundamentals"]
+
+
+@pytest.mark.unit
+def test_crypto_run_reaches_graph_as_crypto(tmp_path):
+    graph = FakeGraph(tmp_path)
+    _drain(start_run(_req(ticker="ETH-USD", analysts=["market", "fundamentals"], checkpoint=True),
+                     graph_factory=graph))
+    assert graph.asset_type == "crypto" and graph.checkpoint_asset_type == "crypto"
+    assert graph.selected == ["market"]
+
+
+@pytest.mark.unit
+def test_stock_run_reaches_graph_as_stock(tmp_path):
+    graph = FakeGraph(tmp_path)
+    _drain(start_run(_req(), graph_factory=graph))
+    assert graph.asset_type == "stock"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("provider, kw, url", [
+    ("ollama", {}, "http://localhost:11434/v1"),
+    ("openai", {}, "https://api.openai.com/v1"),
+    ("anthropic", {}, None),                   # each client's own endpoint
+    ("deepseek", {}, None),
+    ("openai_compatible", {"backend_url": " http://localhost:8000/v1 "}, "http://localhost:8000/v1"),
+])
+def test_endpoint_per_provider(provider, kw, url):
+    assert build_config(_req(provider=provider, **kw))["backend_url"] == url
+
+
+@pytest.mark.unit
+def test_preflight_names_a_missing_provider_key(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    assert "GOOGLE_API_KEY" in preflight(_req(provider="google"))
+    monkeypatch.setenv("GOOGLE_API_KEY", "k")
+    assert preflight(_req(provider="google")) is None
+
+
+@pytest.mark.unit
+def test_preflight_needs_both_models():
+    assert "model" in preflight(_req(provider="anthropic", deep_model=" "))
+
+
+@pytest.mark.unit
+def test_preflight_openai_compatible_needs_url():
+    assert "URL" in preflight(_req(provider="openai_compatible"))
+
+
+@pytest.mark.unit
+def test_advanced_settings_reach_the_config():
+    cfg = build_config(_req(provider="openai", output_language="Hindi", openai_reasoning_effort="high",
+                            anthropic_effort="", temperature=0.3,
+                            data_vendors={"news_data": "alpha_vantage,yfinance"}))
+    assert cfg["output_language"] == "Hindi" and cfg["openai_reasoning_effort"] == "high"
+    assert cfg["anthropic_effort"] is None and cfg["temperature"] == 0.3
+    assert cfg["data_vendors"]["news_data"] == "alpha_vantage,yfinance"
+    assert cfg["data_vendors"]["core_stock_apis"] == DEFAULT_CONFIG["data_vendors"]["core_stock_apis"]
+    assert DEFAULT_CONFIG["data_vendors"]["news_data"] == "yfinance"     # the shared default untouched
+
+
+@pytest.mark.unit
+def test_defaults_leave_the_engine_alone():
+    cfg = build_config(_req())
+    assert cfg["temperature"] is None and cfg["google_thinking_level"] is None
+    assert cfg["output_language"] == "English" and cfg["deep_think_provider"] is None
+
+
+@pytest.mark.unit
+def test_deep_tier_on_its_own_provider():
+    req = _req(provider="ollama", deep_provider="anthropic", deep_model="claude-opus-5-5")
+    cfg = build_config(req)
+    assert (cfg["llm_provider"], cfg["deep_think_provider"]) == ("ollama", "anthropic")
+    assert cfg["backend_url"] == "http://localhost:11434/v1" and cfg["deep_think_backend_url"] is None
+    assert req.split_tiers and req.paid
+    # The same provider named twice is no split at all.
+    assert build_config(_req(deep_provider="ollama"))["deep_think_provider"] is None
+
+
+@pytest.mark.unit
+def test_deep_tier_on_an_openai_compatible_server():
+    cfg = build_config(_req(provider="anthropic", deep_provider="openai_compatible",
+                            deep_backend_url="http://localhost:8000/v1"))
+    assert cfg["deep_think_backend_url"] == "http://localhost:8000/v1"
+
+
+@pytest.mark.unit
+def test_preflight_checks_each_tier(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def get(url, timeout):
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"data": [{"id": "qwen3:4b"}]})
+
+    req = _req(provider="ollama", quick_model="qwen3:4b", deep_provider="anthropic", deep_model="claude-x")
+    assert "ANTHROPIC_API_KEY" in preflight(req, get=get)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert preflight(req, get=get) is None          # the Claude model is not looked for in Ollama

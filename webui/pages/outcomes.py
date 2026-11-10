@@ -2,8 +2,9 @@
 
 import streamlit as st
 
-from webui import outcomes
+from webui import outcomes, providers
 from webui.events import active_run, set_active_run
+from webui.prefs import run_settings
 from webui.runner import RunRequest, preflight
 from webui.ui_common import get_prefs, other_job_notice, rating_badge, run_blocked
 
@@ -74,18 +75,19 @@ if summary and summary.by_rating:
         st.caption(f"Measured over {summary.holding}.")
 
 st.subheader("Settle due decisions")
-paid = prefs.provider == "openai"
+paid = providers.run_paid(prefs.provider, prefs.deep_provider)
 if prefs.demo_mode:
     st.caption("Off in demo mode: settling fetches real prices and asks the model for a reflection "
                "on each decision. Turn demo mode off in Settings.")
-st.caption(f"{due} pending. Settling uses {'OpenAI (paid)' if paid else 'Ollama (free)'} · "
-           f"{prefs.deep_model} for one reflection per decision whose window has traded.")
+st.caption(f"{due} pending. Settling uses {providers.cost_note(prefs.provider)} · "
+           f"{prefs.quick_model} for one reflection per decision whose window has traded.")
 paid_ok = st.checkbox("I understand this uses paid API credits", key="settle_paid") if paid else True
 if st.button("Settle now", key="settle", type="primary",
              disabled=prefs.demo_mode or not due or not paid_ok or run_blocked()):
     req = RunRequest(ticker="", trade_date="", analysts=["market"], provider=prefs.provider,
                      quick_model=prefs.quick_model, deep_model=prefs.deep_model,
-                     ollama_url=prefs.ollama_url, debate_rounds=1, risk_rounds=1)
+                     ollama_url=prefs.ollama_url, debate_rounds=1, risk_rounds=1,
+                     backend_url=prefs.backend_url, **run_settings(prefs))
     problem = preflight(req)
     if problem:
         st.error(problem)

@@ -1,31 +1,29 @@
 """Defaults for new runs, Ollama status, and which API keys are set (never their values)."""
 
-import os
-
 import requests
 import streamlit as st
 
-from webui import portfolio_store
+from tradingagents.dataflows.router import TOOLS_CATEGORIES
+from webui import portfolio_store, providers, vendors
 from webui.prefs import save_prefs
 from webui.runner import OLLAMA_DOWN, ollama_models
-from webui.ui_common import get_prefs
+from webui.ui_common import advanced_inputs, get_prefs, llm_inputs
 
 st.title("Settings")
 prefs = get_prefs()
 
-PROVIDERS = {"Ollama": "ollama", "OpenAI": "openai"}
-label = st.radio("Default provider", list(PROVIDERS), key="provider", horizontal=True,
-                 index=list(PROVIDERS.values()).index(prefs.provider)
-                 if prefs.provider in PROVIDERS.values() else 0)
-if PROVIDERS[label] == "openai":
-    st.caption("OpenAI runs use paid API credits.")
-quick = st.text_input("Quick-thinking model", prefs.quick_model, key="quick_model")
-deep = st.text_input("Deep-thinking model", prefs.deep_model, key="deep_model")
-url = st.text_input("Ollama URL", prefs.ollama_url, key="ollama_url")
+choice = llm_inputs(prefs, "")
+for tier_provider, tier_url in choice.tiers:
+    if providers.is_paid(tier_provider):
+        st.caption(f"{providers.label(tier_provider)} runs bill your account.")
+    if tier_provider != "ollama" and (setup := providers.missing_setup(tier_provider, tier_url)):
+        st.caption(f"Before this can run: {setup}")
+advanced = advanced_inputs(prefs, "", choice)
 
-if st.button("Check Ollama", key="check_ollama"):
+ollama_url = next((u for p, u in choice.tiers if p == "ollama"), "")
+if ollama_url and st.button("Check Ollama", key="check_ollama"):
     try:
-        models = ollama_models(url)
+        models = ollama_models(ollama_url)
         st.success("Ollama is running. Installed models: " + (", ".join(models) or "none"))
     except (requests.ConnectionError, requests.Timeout):
         st.error(OLLAMA_DOWN)
@@ -36,14 +34,39 @@ demo = st.toggle("Demo mode (replay a saved run; no model is called)", prefs.dem
 checkpoint = st.toggle("Save checkpoints (a stopped live run can resume where it left off)",
                        prefs.checkpoint, key="checkpoint")
 
-st.subheader("API keys")
-st.caption("Edit `.env` to change keys. Only whether each key is set is shown here.")
-for name, var in (("OpenAI", "OPENAI_API_KEY"), ("FRED", "FRED_API_KEY")):
-    st.markdown(f"{name} key: {'set' if os.environ.get(var) else 'missing'}")
+st.subheader("Data vendors")
+st.caption("Where each kind of data comes from, tried in the order listed: when one can't serve a "
+           "request, the next is asked. Only vendors listed are ever used.")
+chains, vendor_problems = {}, []
+for category in vendors.choosable():
+    picked = st.multiselect(TOOLS_CATEGORIES[category]["description"], vendors.options(category),
+                            default=vendors.chain_for(prefs.data_vendors, category),
+                            format_func=vendors.label, key=f"vendors_{category}")
+    chains[category] = picked
+    if problem := vendors.chain_problem(category, picked):
+        st.error(problem)
+        vendor_problems.append(problem)
+    for note in vendors.key_notes(picked):
+        st.caption(note)
 
-if st.button("Save", key="save", type="primary"):
-    prefs.provider, prefs.quick_model, prefs.deep_model = PROVIDERS[label], quick.strip(), deep.strip()
-    prefs.ollama_url, prefs.demo_mode, prefs.checkpoint = url.strip(), demo, checkpoint
+st.subheader("API keys")
+st.caption("Edit `.env` (or `.env.enterprise` for Azure) and restart to change keys. "
+           "Only whether each key is set is shown here.")
+st.markdown("  \n".join(f"{name} key: {'set' if is_set else 'missing'} (`{var}`)"
+                        for name, var, is_set in providers.key_status()))
+
+if st.button("Save", key="save", type="primary", disabled=bool(vendor_problems)):
+    prefs.provider, prefs.quick_model, prefs.deep_model = choice.provider, choice.quick, choice.deep
+    for tier_provider, tier_url in choice.tiers:
+        if tier_provider == "ollama":
+            prefs.ollama_url = tier_url
+        elif tier_provider == "openai_compatible" and tier_provider == choice.provider:
+            prefs.backend_url = tier_url
+    prefs.deep_provider, prefs.deep_backend_url = choice.deep_provider, choice.deep_url
+    for name, value in advanced.items():
+        setattr(prefs, name, value)
+    prefs.data_vendors = vendors.overrides(chains)
+    prefs.demo_mode, prefs.checkpoint = demo, checkpoint
     save_prefs(prefs)
     st.success("Saved.")
 

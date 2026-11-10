@@ -45,6 +45,8 @@ def test_plan_counts_cells():
     ({"start": "2026-1-5"}, "YYYY-MM-DD"),
     ({"every": 0}, "at least 1"),
     ({"start": "2025-01-01", "end": "2026-01-01", "every": 1}, "limit of 60"),
+    ({"tickers": ["AAPL", "BTC-USD"]}, "can't share a sweep"),
+    ({"tickers": ["BTC-USD"], "analysts": ["fundamentals"]}, "doesn't apply to crypto"),
 ])
 def test_plan_rejects(kw, needle):
     assert needle in br.plan_cells(_req(**kw))[2]
@@ -61,9 +63,10 @@ def _drain(h, timeout=5):
 def test_sweep_emits_progress_failures_and_summary(tmp_path):
     seen = {}
 
-    def fake(tickers, dates, config, portfolio=None, selected_analysts=(), run_id=None, progress=None):
+    def fake(tickers, dates, config, asset_type="stock", portfolio=None, selected_analysts=(),
+             run_id=None, progress=None):
         seen.update(tickers=tickers, dates=dates, config=config, portfolio=portfolio,
-                    analysts=selected_analysts, run_id=run_id)
+                    analysts=selected_analysts, run_id=run_id, asset_type=asset_type)
         log = tmp_path / "trading_memory.md"
         TradingMemoryLog({"memory_log_path": str(log)}).store_decision("AAPL", dates[0], "**Rating**: Buy")
         for i, (t, d) in enumerate([(t, d) for t in tickers for d in dates], 1):
@@ -75,12 +78,27 @@ def test_sweep_emits_progress_failures_and_summary(tmp_path):
     evs = _drain(h)
     assert h.kind == "backtest"
     assert seen["analysts"] == ["market", "social"] and seen["run_id"] == "old"
+    assert seen["asset_type"] == "stock"
     assert seen["config"]["llm_provider"] == "ollama" and seen["config"]["checkpoint_enabled"] is False
     progress = [e for e in evs if e.kind == "progress"]
     assert len(progress) == 8 and progress[0].total == 8 and progress[-1].content == "MSFT 2026-01-26"
     assert any(e.stage == "failed" and "vendor down" in e.content for e in evs)
     done = evs[-1]
     assert done.kind == "done" and done.title == "20261109_120000" and "Ran 7 of 8 runs" in done.content
+
+
+@pytest.mark.unit
+def test_crypto_sweep_runs_as_crypto_without_fundamentals():
+    seen = {}
+
+    def fake(tickers, dates, config, asset_type="stock", selected_analysts=(), **kw):
+        seen.update(tickers=tickers, asset_type=asset_type, analysts=selected_analysts)
+        raise RuntimeError("stop here")
+
+    req = _req(tickers=["btcusd", "eth-usd"], analysts=["market", "fundamentals"])
+    assert br.plan_cells(req)[2] is None
+    _drain(br.start_backtest(req, backtest=fake))
+    assert seen == {"tickers": ["BTC-USD", "ETH-USD"], "asset_type": "crypto", "analysts": ["market"]}
 
 
 @pytest.mark.unit

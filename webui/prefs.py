@@ -20,11 +20,31 @@ class UIPrefs:
     quick_model: str = "qwen3:4b"
     deep_model: str = "qwen3:4b"
     ollama_url: str = "http://localhost:11434/v1"
+    backend_url: str = ""       # an OpenAI-compatible server's endpoint
     analysts: list[str] = field(default_factory=lambda: ["market", "news", "fundamentals"])
     debate_rounds: int = 1
     risk_rounds: int = 1
     demo_mode: bool = True
     checkpoint: bool = True     # save each step so a stopped live run can resume
+    # Advanced; "" or None leaves each to the engine's (or the provider's) default.
+    deep_provider: str = ""     # the deep-thinking tier on a provider of its own
+    deep_backend_url: str = ""  # that provider's endpoint, when it takes one
+    output_language: str = "English"
+    openai_reasoning_effort: str = ""
+    anthropic_effort: str = ""
+    google_thinking_level: str = ""
+    temperature: float | None = None
+    data_vendors: dict = field(default_factory=dict)   # category -> "vendor,vendor"
+
+
+# The prefs a run carries as they are (RunRequest has a field of each name).
+RUN_SETTINGS = ("deep_provider", "deep_backend_url", "output_language", "openai_reasoning_effort",
+                "anthropic_effort", "google_thinking_level", "temperature", "data_vendors")
+
+
+def run_settings(prefs: UIPrefs) -> dict:
+    """The advanced settings for a run started from these prefs."""
+    return {name: getattr(prefs, name) for name in RUN_SETTINGS}
 
 
 def load_prefs(path: Path | None = None) -> UIPrefs:

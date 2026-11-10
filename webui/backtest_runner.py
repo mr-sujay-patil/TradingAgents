@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.default_config import DEFAULT_CONFIG
 from webui.events import RunEvent, RunHandle, set_active_run
-from webui.runner import RunRequest, build_config, graph_analysts
+from webui.runner import RunRequest, analysts_for, asset_type, build_config, graph_analysts
 
 MAX_CELLS = 60
 
@@ -35,17 +36,33 @@ class BacktestRequest:
     risk_rounds: int = 1
     portfolio: Any = None
     run_id: str | None = None
+    backend_url: str = ""
+    settings: dict = field(default_factory=dict)   # webui.prefs.run_settings
 
     def __post_init__(self):
-        cleaned = (t.strip().upper() for t in self.tickers)
-        self.tickers = list(dict.fromkeys(t for t in cleaned if t))
+        cleaned = (normalize_symbol(t.strip()) for t in self.tickers if t.strip())
+        self.tickers = list(dict.fromkeys(cleaned))
+
+    @property
+    def asset_types(self) -> set[str]:
+        return {asset_type(t) for t in self.tickers}
+
+    @property
+    def asset_type(self) -> str:
+        """The sweep's one asset type; ``plan_cells`` refuses a mix."""
+        return "crypto" if self.asset_types == {"crypto"} else "stock"
+
+    @property
+    def run_analysts(self) -> list[str]:
+        return analysts_for(self.analysts, self.asset_type)
 
     def run_request(self) -> RunRequest:
         """The single-run settings each cell uses, for config and preflight."""
         return RunRequest(ticker=self.tickers[0] if self.tickers else "", trade_date=self.start,
                           analysts=self.analysts, provider=self.provider, quick_model=self.quick_model,
                           deep_model=self.deep_model, ollama_url=self.ollama_url,
-                          debate_rounds=self.debate_rounds, risk_rounds=self.risk_rounds)
+                          debate_rounds=self.debate_rounds, risk_rounds=self.risk_rounds,
+                          backend_url=self.backend_url, **self.settings)
 
 
 def parse_tickers(text: str) -> list[str]:
@@ -60,6 +77,11 @@ def plan_cells(req: BacktestRequest) -> tuple[list[str], int, str | None]:
         return [], 0, "Enter at least one ticker."
     if not req.analysts:
         return [], 0, "Pick at least one analyst."
+    if len(req.asset_types) > 1:
+        # The engine runs a sweep under one asset type.
+        return [], 0, "Crypto and stock tickers can't share a sweep; run them separately."
+    if not req.run_analysts:
+        return [], 0, "The Fundamentals analyst doesn't apply to crypto; pick another analyst."
     try:
         dates = iter_grid(req.start, req.end, req.every)
     except ValueError as exc:
@@ -89,7 +111,8 @@ def start_backtest(req: BacktestRequest, backtest=None) -> RunHandle:
     def run():
         try:
             result = backtest(req.tickers, dates, build_config(req.run_request()),
-                              portfolio=req.portfolio, selected_analysts=graph_analysts(req.analysts),
+                              asset_type=req.asset_type, portfolio=req.portfolio,
+                              selected_analysts=graph_analysts(req.run_analysts),
                               run_id=req.run_id or None, progress=progress)
             for ticker, date, reason in result.failures:
                 handle.emit(RunEvent("report", stage="failed", title=f"{ticker} {date}", content=reason))

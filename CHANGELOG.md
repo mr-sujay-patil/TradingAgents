@@ -15,6 +15,12 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 - Web UI: an **Outcomes** page shows how past decisions did (return, alpha against the benchmark, reflection), scores them by rating, and settles due decisions on demand; History gains an Outcome column.
 - Web UI: a standing **portfolio** (holdings, cash, currency) kept in Settings, in the same format as `--portfolio`, used by New run, Home and Backtest when ticked.
 - Web UI: live runs save **checkpoints** by default, and a run that stops part-way offers Resume from its last finished step.
+- Web UI: every LLM provider the CLI offers (all but the ChatGPT plan), with each provider's suggested models, the models installed in Ollama, or any model ID; a paid provider asks for confirmation, and a missing key, Azure setting, Bedrock extra or server URL is named before a run starts. Settings shows which key is set for every provider.
+- Web UI: an **Advanced** panel on New run and Settings sets the report language, reasoning effort (OpenAI), effort (Anthropic) or thinking (Gemini), and the sampling temperature; the deep-thinking tier can run on a provider of its own; Settings orders the data vendors for each kind of data and refuses a list that cannot serve every tool in it.
+
+### Fixed
+
+- Web UI: crypto tickers (e.g. `BTC-USD`, `BTCUSD`) ran as stocks, with the Fundamentals analyst; they now run as crypto under their canonical symbol, as in the CLI, and a backtest refuses to mix crypto and stock tickers.
 
 ## [0.7.1] — 2026-10-27
 

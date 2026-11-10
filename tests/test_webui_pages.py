@@ -61,7 +61,7 @@ def test_settings_shows_key_status_not_value(monkeypatch):
 @pytest.mark.unit
 def test_settings_save_persists(tmp_path):
     at = AppTest.from_file(page("settings")).run()
-    at.radio(key="provider").set_value("OpenAI")
+    at.selectbox(key="provider").set_value("openai").run()
     at.button(key="save").click().run()
     assert not at.exception
     assert prefs_mod.load_prefs().provider == "openai"
@@ -95,6 +95,18 @@ def test_run_disabled_without_analysts():
         at.checkbox(key=f"analyst_{name}").uncheck()
     at.run()
     assert at.button(key="run").disabled
+
+
+@pytest.mark.unit
+def test_crypto_ticker_notes_fundamentals_sits_out():
+    at = AppTest.from_file(page("new_run")).run()
+    at.text_input(key="run_ticker").input("BTC-USD").run()
+    assert "Fundamentals" in _text(at) and "crypto" in _text(at).lower()
+    for name in ("market", "sentiment", "news"):
+        at.checkbox(key=f"analyst_{name}").uncheck()
+    at.checkbox(key="analyst_fundamentals").check()
+    at.run()
+    assert at.button(key="run").disabled      # nothing left to run for crypto
 
 
 @pytest.mark.unit
@@ -435,3 +447,134 @@ def test_backtest_progress_view():
     h.emit(RunEvent("done", title="20261109_1", content="Resolved cells: 0", report_dir="/x"))
     at.run()
     assert any("Sweep 20261109_1 finished" in s.value for s in at.success)
+
+
+@pytest.mark.unit
+def test_new_run_offers_every_provider():
+    from webui import providers
+    at = AppTest.from_file(page("new_run")).run()
+    assert at.selectbox(key="run_provider").options == [providers.label(k) for k in providers.KEYS]
+
+
+@pytest.mark.unit
+def test_hosted_provider_is_paid_and_names_its_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    at = AppTest.from_file(page("new_run")).run()
+    at.selectbox(key="run_provider").set_value("anthropic").run()
+    at.text_input(key="run_ticker").input("AAPL").run()
+    assert any("Anthropic — paid" in w.value for w in at.warning)
+    assert "ANTHROPIC_API_KEY" in _text(at)
+    assert at.button(key="run").disabled               # paid needs the confirmation
+    at.checkbox(key="paid_ok").check().run()
+    assert not at.button(key="run").disabled
+
+
+@pytest.mark.unit
+def test_openai_compatible_run_carries_its_url(monkeypatch):
+    from webui import runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    seen = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(runner, "start_run", lambda req: seen.append(req))
+    at = AppTest.from_file(page("new_run")).run()
+    at.selectbox(key="run_provider").set_value("openai_compatible").run()
+    at.text_input(key="run_backend_url").input("http://localhost:8000/v1").run()
+    at.text_input(key="run_quick_openai_compatible").input("my-model").run()
+    at.text_input(key="run_deep_openai_compatible").input("my-model").run()
+    at.text_input(key="run_ticker").input("AAPL").run()
+    at.button(key="run").click().run()
+    assert not at.exception and seen
+    assert (seen[0].provider, seen[0].backend_url, seen[0].quick_model) == (
+        "openai_compatible", "http://localhost:8000/v1", "my-model")
+
+
+@pytest.mark.unit
+def test_switching_provider_starts_at_its_default_models():
+    at = AppTest.from_file(page("new_run")).run()
+    at.selectbox(key="run_provider").set_value("openai").run()
+    assert at.selectbox(key="run_quick_openai").value == "gpt-6-luna"
+
+
+@pytest.mark.unit
+def test_settings_saves_openai_compatible_endpoint():
+    at = AppTest.from_file(page("settings")).run()
+    at.selectbox(key="provider").set_value("openai_compatible").run()
+    at.text_input(key="backend_url").input("http://localhost:1234/v1").run()
+    at.text_input(key="quick_openai_compatible").input("local-q").run()
+    at.text_input(key="deep_openai_compatible").input("local-d").run()
+    at.button(key="save").click().run()
+    saved = prefs_mod.load_prefs()
+    assert (saved.provider, saved.backend_url, saved.quick_model, saved.deep_model) == (
+        "openai_compatible", "http://localhost:1234/v1", "local-q", "local-d")
+
+
+@pytest.mark.unit
+def test_new_run_passes_advanced_settings(monkeypatch):
+    from webui import runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(provider="openai", quick_model="gpt-6-luna", deep_model="gpt-6-sol",
+                                           demo_mode=False, data_vendors={"news_data": "alpha_vantage"}))
+    seen = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(runner, "start_run", lambda req: seen.append(req))
+    at = AppTest.from_file(page("new_run")).run()
+    assert not at.exception
+    at.selectbox(key="run_language").set_value("Japanese")
+    at.selectbox(key="run_openai_reasoning_effort").set_value("high")
+    at.checkbox(key="run_set_temp").check().run()
+    at.slider(key="run_temp").set_value(0.2)
+    at.text_input(key="run_ticker").input("AAPL")
+    at.checkbox(key="paid_ok").check().run()
+    at.button(key="run").click().run()
+    req = seen[0]
+    assert (req.output_language, req.openai_reasoning_effort, req.temperature) == ("Japanese", "high", 0.2)
+    assert req.data_vendors == {"news_data": "alpha_vantage"}
+    assert "run_anthropic_effort" not in [s.key for s in at.selectbox]   # not for an OpenAI run
+
+
+@pytest.mark.unit
+def test_new_run_deep_tier_on_another_provider(monkeypatch):
+    from webui import runner
+    prefs_mod.save_prefs(prefs_mod.UIPrefs(demo_mode=False))
+    seen = []
+    monkeypatch.setattr(runner, "preflight", lambda req: None)
+    monkeypatch.setattr(runner, "start_run", lambda req: seen.append(req))
+    at = AppTest.from_file(page("new_run")).run()
+    at.checkbox(key="run_split").check().run()
+    at.selectbox(key="run_deep_provider").set_value("anthropic").run()
+    assert "ollama" not in at.selectbox(key="run_deep_provider").options
+    assert any("paid" in w.value for w in at.warning)                  # Ollama + a paid deep tier
+    at.text_input(key="run_ticker").input("AAPL")
+    at.checkbox(key="paid_ok").check().run()
+    at.button(key="run").click().run()
+    assert seen and (seen[0].provider, seen[0].deep_provider) == ("ollama", "anthropic")
+    assert seen[0].deep_model.startswith("claude")
+
+
+@pytest.mark.unit
+def test_settings_saves_advanced_and_vendors():
+    at = AppTest.from_file(page("settings")).run()
+    at.selectbox(key="language").set_value("German")
+    at.multiselect(key="vendors_news_data").select("alpha_vantage").run()
+    at.button(key="save").click().run()
+    saved = prefs_mod.load_prefs()
+    assert saved.output_language == "German"
+    assert saved.data_vendors == {"news_data": "yfinance,alpha_vantage"}
+
+
+@pytest.mark.unit
+def test_settings_refuses_a_vendor_chain_that_cannot_serve():
+    at = AppTest.from_file(page("settings")).run()
+    at.multiselect(key="vendors_fundamental_data").unselect("yfinance").run()
+    assert any("get_fundamentals" in e.value for e in at.error)
+    assert at.button(key="save").disabled
+
+
+@pytest.mark.unit
+def test_old_prefs_file_loads_with_advanced_defaults(tmp_path):
+    import json
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"provider": "openai"}), encoding="utf-8")
+    loaded = prefs_mod.load_prefs(path)
+    assert loaded.provider == "openai" and loaded.output_language == "English"
+    assert loaded.temperature is None and loaded.data_vendors == {} and loaded.deep_provider == ""

@@ -230,11 +230,11 @@ tradingagents-ui        # opens http://localhost:8501
 - **History** lists every saved run, from the UI or the CLI; open one by stage, or pick two or three to compare their decisions side by side.
 - **Outcomes** shows how past decisions did against their benchmark, scored by rating, and settles the ones now due.
 - **Backtest** runs a grid of tickers and past dates with live progress, and lists past sweeps with their scores.
-- **Settings** sets the default provider and models, checks Ollama, keeps your portfolio (holdings and cash the agents see), toggles checkpoints, and shows which API keys are set (never their values).
+- **Settings** sets the default provider and models (the deep-thinking tier can use a provider of its own), the report language, reasoning effort and temperature, and the order of data vendors; checks Ollama, keeps your portfolio (holdings and cash the agents see), toggles checkpoints, and shows which API keys are set (never their values).
 
 A live run that stops part-way can be resumed from its last finished step (checkpoints are on by default).
 
-The UI starts in demo mode, which replays a saved run without calling a model, and defaults to Ollama with `qwen3:4b` (`ollama pull qwen3:4b`). Choosing OpenAI asks you to confirm before a paid run starts. Backtests and settling are off in demo mode.
+The UI starts in demo mode, which replays a saved run without calling a model, and defaults to Ollama with `qwen3:4b` (`ollama pull qwen3:4b`). Every provider the CLI offers is available except the ChatGPT plan, which signs in from the terminal; a paid one asks you to confirm before a run starts, and a missing key or endpoint is named before anything runs. Crypto tickers such as `BTC-USD` run as crypto, without the Fundamentals analyst, as in the CLI. Backtests and settling are off in demo mode.
 
 ### Markets and tickers
 

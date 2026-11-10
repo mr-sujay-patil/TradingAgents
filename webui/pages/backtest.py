@@ -5,11 +5,18 @@ from datetime import date, timedelta
 
 import streamlit as st
 
-from webui import backtest_runner as br
+from webui import backtest_runner as br, providers
 from webui.events import active_run, set_active_run
+from webui.prefs import run_settings
 from webui.runner import preflight
 from webui.stages import ANALYSTS, STAGE_BY_KEY
-from webui.ui_common import get_prefs, other_job_notice, portfolio_choice, run_blocked
+from webui.ui_common import (
+    get_prefs,
+    other_job_notice,
+    portfolio_choice,
+    provider_label,
+    run_blocked,
+)
 
 st.title("Backtest")
 st.caption("Each cell is a full analysis on a past date, scored later against the benchmark over "
@@ -112,13 +119,16 @@ req = br.BacktestRequest(tickers=br.parse_tickers(tickers_text), start=start.iso
                          every=int(every), analysts=analysts, provider=prefs.provider,
                          quick_model=prefs.quick_model, deep_model=prefs.deep_model,
                          ollama_url=prefs.ollama_url, debate_rounds=prefs.debate_rounds,
-                         risk_rounds=prefs.risk_rounds, portfolio=book, run_id=continue_id)
+                         risk_rounds=prefs.risk_rounds, portfolio=book, run_id=continue_id,
+                         backend_url=prefs.backend_url, settings=run_settings(prefs))
 dates, cells, problem = br.plan_cells(req)
-paid = prefs.provider == "openai"
+paid = providers.run_paid(prefs.provider, prefs.deep_provider)
 if req.tickers and not problem:
     st.info(f"{len(req.tickers)} ticker{'s' if len(req.tickers) != 1 else ''} × {len(dates)} "
             f"date{'s' if len(dates) != 1 else ''} = **{cells} runs** on "
-            f"{'OpenAI (paid)' if paid else 'Ollama (free)'} · {prefs.deep_model}.")
+            f"{provider_label(prefs)}.")
+    if req.asset_type == "crypto" and "fundamentals" in analysts:
+        st.caption("A crypto sweep: the Fundamentals analyst doesn't apply to a coin and sits it out.")
 elif problem and (req.tickers or tickers_text.strip()):
     st.error(problem)
 paid_ok = st.checkbox("I understand every run uses paid API credits", key="bt_paid") if paid else True
