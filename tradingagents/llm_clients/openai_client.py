@@ -72,6 +72,21 @@ class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
         return super().with_structured_output(schema, method=method, **kwargs)
 
 
+class OllamaChatOpenAI(LocalCompatibleChatOpenAI):
+    """Ollama: structured output as a JSON schema the answer must match.
+
+    Offered the schema only as a tool it may call (``tool_choice`` cannot force
+    it, #1062), a thinking model such as gemma4 follows the prompt's own "write
+    these sections" and answers in prose, leaving nothing to parse, so every
+    structured agent fell back to free text. Ollama constrains generation to a
+    ``response_format`` JSON schema (Ollama 0.5+), which holds on long prompts.
+    An explicit ``method`` is still honored.
+    """
+
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        return super().with_structured_output(schema, method=method or "json_schema", **kwargs)
+
+
 def _input_to_messages(input_: Any) -> list:
     """Normalise a langchain LLM input to a list of message objects.
 
@@ -277,7 +292,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama",
-                               chat_class=LocalCompatibleChatOpenAI),
+                               chat_class=OllamaChatOpenAI),
     # The person's ChatGPT plan, through their own sign-in.
     "chatgpt":    ProviderSpec(base_url="https://api.openai.com/v1", chat_class=ChatGPTPlanChatOpenAI,
                                use_responses_api=True, credential=_chatgpt_credential,

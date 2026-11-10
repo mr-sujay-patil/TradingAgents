@@ -149,18 +149,8 @@ def test_ollama_offers_custom_model_id():
         assert values[-1] == "custom", f"'custom' should be last entry: {values}"
 
 
-@pytest.mark.unit
-def test_structured_output_suppresses_object_tool_choice(monkeypatch):
-    """Ollama rejects the object-form tool_choice like other local servers
-    (#1062), and a local model ID has no capability entry saying otherwise, so
-    it takes the same client as the generic local endpoint."""
+def _capture_structured(monkeypatch) -> dict:
     from langchain_openai import ChatOpenAI
-    from pydantic import BaseModel
-
-    from tradingagents.llm_clients import create_llm_client
-
-    class Schema(BaseModel):
-        x: int
 
     captured = {}
     monkeypatch.setattr(
@@ -168,7 +158,41 @@ def test_structured_output_suppresses_object_tool_choice(monkeypatch):
         "with_structured_output",
         lambda self, schema, method=None, **kw: captured.update({"method": method, **kw}) or "BOUND",
     )
+    return captured
 
-    create_llm_client(provider="ollama", model="qwen3:30b").get_llm().with_structured_output(Schema)
 
-    assert captured["tool_choice"] is None
+@pytest.mark.unit
+def test_structured_output_constrains_the_answer_to_the_schema(monkeypatch):
+    """Offered the schema only as a tool it may call, a thinking model (gemma4)
+    follows the prompt's own 'write these sections' and answers in prose, so
+    nothing parses and every structured agent falls back to free text. Ollama
+    constrains the answer itself with a JSON schema."""
+    from pydantic import BaseModel
+
+    from tradingagents.llm_clients import create_llm_client
+
+    class Schema(BaseModel):
+        x: int
+
+    captured = _capture_structured(monkeypatch)
+    create_llm_client(provider="ollama", model="gemma4:26b").get_llm().with_structured_output(Schema)
+
+    assert captured["method"] == "json_schema"
+    assert "tool_choice" not in captured
+
+
+@pytest.mark.unit
+def test_function_calling_on_request_suppresses_object_tool_choice(monkeypatch):
+    """Ollama rejects the object-form tool_choice like other local servers (#1062)."""
+    from pydantic import BaseModel
+
+    from tradingagents.llm_clients import create_llm_client
+
+    class Schema(BaseModel):
+        x: int
+
+    captured = _capture_structured(monkeypatch)
+    llm = create_llm_client(provider="ollama", model="qwen3:30b").get_llm()
+    llm.with_structured_output(Schema, method="function_calling")
+
+    assert captured["method"] == "function_calling" and captured["tool_choice"] is None

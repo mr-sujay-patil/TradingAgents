@@ -20,6 +20,7 @@ Changes that need action when upgrading are listed under "Upgrading from" in the
 
 ### Fixed
 
+- Ollama: structured agents (Research Manager, Trader, Portfolio Manager, Sentiment Analyst) now ask for a JSON schema the answer must match. Offered the schema only as an optional tool, thinking models such as gemma4 answered in prose, so every structured step fell back to free text.
 - Web UI: crypto tickers (e.g. `BTC-USD`, `BTCUSD`) ran as stocks, with the Fundamentals analyst; they now run as crypto under their canonical symbol, as in the CLI, and a backtest refuses to mix crypto and stock tickers.
 
 ## [0.7.1] — 2026-10-27
